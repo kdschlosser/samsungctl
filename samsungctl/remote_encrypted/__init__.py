@@ -197,7 +197,7 @@ class RemoteEncrypted(object):
                 'Unable to open connection.. Is the TV off?!?'
             )
 
-        print('websocket_response: ' + websocket_response.content)
+        print('websocket_response: ' + websocket_response.content.decode("utf-8"))
 
         websocket_url = (
             'ws://' +
@@ -237,7 +237,7 @@ class RemoteEncrypted(object):
     @LogIt
     def show_pin_page(self):
         response = requests.post(self.get_full_url("/ws/apps/CloudPINPage"), "pin4")
-        print('show_pin_page: ' + response.content)
+        print('show_pin_page: ' + response.content.decode("utf-8"))
 
     @LogItWithReturn
     def check_pin_page(self):
