@@ -94,7 +94,12 @@ class RemoteWebsocket(websocket_base.WebSocketBase):
                 )
 
             try:
-                self.sock = websocket.create_connection(url, sslopt=sslopt)
+                self.sock = websocket.create_connection(
+                    url, 
+                    self.config.timeout,
+                    #ssl_handshake_timeout=self.config.timeout,
+                    sslopt=sslopt
+                )
             except:
                 if not self.config.paired:
                     raise RuntimeError('Unable to connect to the TV')
@@ -126,12 +131,12 @@ class RemoteWebsocket(websocket_base.WebSocketBase):
                     raise RuntimeError('Authentication denied')
 
             def auth_callback(data):
+                logger.debug("Access granted.")
+
                 if 'data' in data and 'token' in data["data"]:
                     self.config.token = data['data']["token"]
-
                     logger.debug('new token: ' + self.config.token)
 
-                logger.debug("Access granted.")
                 auth_event.set()
 
                 self.unregister_receive_callback(
@@ -143,8 +148,6 @@ class RemoteWebsocket(websocket_base.WebSocketBase):
                 if 'data' in data and 'token' in data["data"]:
                     self.config.token = data['data']["token"]
                     logger.debug('new token: ' + self.config.token)
-
-                logger.debug("Access granted.")
 
                 if not power and not self.config.paired:
                     self.power = False
@@ -244,6 +247,9 @@ class RemoteWebsocket(websocket_base.WebSocketBase):
                 self.open()
 
             count = 0
+            #max_count = 5
+            max_count = self.config.timeout
+            
             power_off = dict(
                 Cmd='Click',
                 DataOfCmd='KEY_POWEROFF',
@@ -262,11 +268,11 @@ class RemoteWebsocket(websocket_base.WebSocketBase):
             logger.info("Sending control command: " + str(power_off))
             self.send("ms.remote.control", **power_off)
 
-            while self.power and count < 10:
+            while self.power and count < max_count:
                 event.wait(1.0)
                 count += 1
 
-            if count == 10:
+            if count == max_count:
                 logger.info('Unable to power off the TV')
 
     power = property(fget=websocket_base.WebSocketBase.power, fset=power)
