@@ -383,7 +383,7 @@ def main():
         logging.error("Error: %s", e.strerror)
 
     if args.config_file:
-        config.save()
+        config.save(args.config_file)
 
 
 if __name__ == "__main__":
