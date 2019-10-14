@@ -210,12 +210,12 @@ class UPNPDiscoverSocket(threading.Thread):
             self.sock.settimeout(timeout)
 
     def run(self):
-
         while not self._event.isSet():
             self.sock.settimeout(self._timeout)
 
             for service in SERVICES:
                 packet = IPV4_SSDP.format(service)
+
                 if SSDP_DEBUG:
                     logger.debug(
                         'SSDP: %s - %s\n%s',
@@ -273,6 +273,77 @@ class UPNPDiscoverSocket(threading.Thread):
                             (packet['ST'], packet['LOCATION'])
                         )
 
+                        ### is found block...
+                        #####################
+                        if found_packets:
+                            if SSDP_DEBUG:
+                                logger.debug(found_packets)
+
+                            powered_on = []
+
+                            for host, packet in found_packets.items():
+                                if self._event.isSet():
+                                    return
+
+                                upnp_locations = list(
+                                    location for _, location in packet
+                                )
+
+                                for service, location in packet:
+                                    if service == SERVICES[0]:
+                                        break
+                                else:
+                                    continue
+
+                                if SSDP_DEBUG:
+                                    logger.debug(
+                                        host +
+                                        ' <-- (' +
+                                        location +
+                                        ') ""'
+                                    )
+
+                                try:
+                                    response = requests.get(location, timeout=2)
+                                except (
+                                    requests.ConnectionError,
+                                    requests.ConnectTimeout
+                                ):
+                                    continue
+
+                                if SSDP_DEBUG:
+                                    logger.debug(
+                                        host +
+                                        ' --> (' +
+                                        location +
+                                        ') ' +
+                                        response.content.decode('utf-8')
+                                    )
+
+                                config = self.populate_info(packet, response, host, upnp_locations)
+                                if config is False:
+                                    continue
+
+                                uuid = config.uuid
+                                self._found[uuid] = config
+                                self._powered_on[uuid] = config
+
+                                self._parent.callback(config, state=True)
+                                powered_on += [uuid]
+
+                            for uuid, config in list(self._found.items())[:]:
+                                if uuid not in powered_on:
+                                    if uuid in self._powered_on:
+                                        del self._powered_on[uuid]
+
+                                    self._parent.callback(
+                                        config,
+                                        state=False
+                                    )
+
+                        else:
+                            self._event.wait(2.0)
+                        #####################
             except socket.timeout:
                 try:
                     self.sock.close()
@@ -281,191 +352,6 @@ class UPNPDiscoverSocket(threading.Thread):
 
                 self.sock = self._create_socket()
 
-                if found_packets:
-                    if SSDP_DEBUG:
-                        logger.debug(found_packets)
-                        powered_on = []
-
-                        for host, packet in found_packets.items():
-                            if self._event.isSet():
-                                return
-
-                            upnp_locations = list(
-                                location for _, location in packet
-                            )
-
-                            for service, location in packet:
-                                if service == SERVICES[0]:
-                                    break
-                            else:
-                                continue
-
-                            if SSDP_DEBUG:
-                                logger.debug(
-                                    host +
-                                    ' <-- (' +
-                                    location +
-                                    ') ""'
-                                )
-                            try:
-                                response = requests.get(location, timeout=2)
-                            except (
-                                requests.ConnectionError,
-                                requests.ConnectTimeout
-                            ):
-                                continue
-
-                            if SSDP_DEBUG:
-                                logger.debug(
-                                    host +
-                                    ' --> (' +
-                                    location +
-                                    ') ' +
-                                    response.content.decode('utf-8')
-                                )
-
-                            try:
-                                root = etree.fromstring(
-                                    response.content.decode('utf-8'))
-                            except etree.ParseError:
-                                continue
-                            except ValueError:
-                                try:
-                                    root = etree.fromstring(response.content)
-                                except etree.ParseError:
-                                    continue
-
-                            root = strip_xmlns(root)
-                            node = root.find('device')
-
-                            if node is None:
-                                continue
-
-                            description = node.find('modelDescription')
-                            if (
-                                description is None or
-                                'Samsung' not in description.text or
-                                'TV' not in description.text
-                            ):
-                                continue
-
-                            model = node.find('modelName')
-                            if model is None:
-                                continue
-
-                            model = model.text
-
-                            uuid = node.find('UDN')
-
-                            if uuid is None or not uuid.text:
-                                continue
-
-                            uuid = uuid.text.split(':')[-1]
-
-                            if uuid in self._found:
-                                config = self._found[uuid]
-                                config.host = host
-                                config.upnp_locations = upnp_locations
-                            else:
-                                product_cap = node.find('ProductCap')
-                                if product_cap is None:
-                                    years = dict(
-                                        A=2008,
-                                        B=2009,
-                                        C=2010,
-                                        D=2011,
-                                        E=2012,
-                                        F=2013,
-                                        H=2014,
-                                        J=2015
-                                    )
-                                    year = years[model[4].upper()]
-                                else:
-                                    product_cap = product_cap.text.split(',')
-
-                                    for item in product_cap:
-                                        if (
-                                            item.upper().startswith('Y') and
-                                            len(item) == 5 and
-                                            item[1:].isdigit()
-                                        ):
-                                            year = int(item[1:])
-                                            break
-                                    else:
-                                        year = None
-
-                                if year is None:
-                                    services = list(
-                                        service for service, _ in packet)
-
-                                    conn_items = CONNECTION_TYPES.items()
-                                    for found_services, method in conn_items:
-                                        for found_service in found_services:
-                                            if found_service not in services:
-                                                break
-                                        else:
-                                            method, port, app_id, mac = (
-                                                method(host)
-                                            )
-                                            break
-                                    else:
-                                        continue
-
-                                elif year <= 2013:
-                                    method, port, app_id, mac = legacy(host)
-                                elif year <= 2015:
-                                    method, port, app_id, mac = encrypted(host)
-                                else:
-                                    method, port, app_id, mac = websocket(host)
-
-                                if mac is None:
-                                    logger.warning(
-                                        'Unable to acquire TV\'s mac address'
-                                    )
-                                config = Config(
-                                    host=host,
-                                    method=method,
-                                    upnp_locations=upnp_locations,
-                                    model=model,
-                                    uuid=uuid,
-                                    mac=mac,
-                                    app_id=app_id,
-                                    port=port,
-                                )
-                                logger.debug(
-                                    'Discovered TV:' +
-                                    ' UUID - ' +
-                                    uuid +
-                                    ' IP - ' +
-                                    host
-                                )
-
-                                self._parent.callback(config, None)
-
-                            self._found[uuid] = config
-                            self._powered_on[uuid] = config
-
-                            self._parent.callback(config, state=True)
-                            powered_on += [uuid]
-
-                        for uuid, config in list(self._found.items())[:]:
-                            if uuid not in powered_on:
-                                if uuid in self._powered_on:
-                                    del self._powered_on[uuid]
-
-                                self._parent.callback(
-                                    config,
-                                    state=False
-                                )
-
-                else:
-                    self._event.wait(2.0)
-
-                if SSDP_DEBUG:
-                    logger.debug(
-                        self._local_address +
-                        ' -- (SSDP) loop restart'
-                    )
             except socket.error:
                 break
 
@@ -475,6 +361,129 @@ class UPNPDiscoverSocket(threading.Thread):
             pass
 
         self.sock = None
+    
+        def populate_info(self, packet, response, host, upnp_locations):
+        try:
+            root = etree.fromstring(
+                response.content.decode('utf-8')
+            )
+
+        except etree.ParseError:
+            return False
+
+        except ValueError:
+            try:
+                root = etree.fromstring(response.content)
+            except etree.ParseError:
+                return False
+
+        root = strip_xmlns(root)
+        node = root.find('device')
+        if node is None:
+            return False
+
+        description = node.find('modelDescription')
+        if (
+                description is None or
+                'Samsung' not in description.text or
+                'TV' not in description.text
+        ):
+            return False
+
+        model = node.find('modelName')
+        if model is None:
+            return False
+
+        model = model.text
+
+        uuid = node.find('UDN')
+        if uuid is None or not uuid.text:
+            return False
+
+        uuid = uuid.text.split(':')[-1]
+        if uuid in self._found:
+            config = self._found[uuid]
+            config.host = host
+            config.upnp_locations = upnp_locations
+        else:
+            product_cap = node.find('ProductCap')
+            if product_cap is None:
+                years = dict(
+                    A=2008,
+                    B=2009,
+                    C=2010,
+                    D=2011,
+                    E=2012,
+                    F=2013,
+                    H=2014,
+                    J=2015
+                )
+                year = years[model[4].upper()]
+            else:
+                product_cap = product_cap.text.split(',')
+
+                for item in product_cap:
+                    if (
+                            item.upper().startswith('Y') and
+                            len(item) == 5 and
+                            item[1:].isdigit()
+                    ):
+                        year = int(item[1:])
+                        break
+                else:
+                    year = None
+
+            if year is None:
+                services = list(
+                    service for service, _ in packet)
+
+                conn_items = CONNECTION_TYPES.items()
+                for found_services, method in conn_items:
+                    for found_service in found_services:
+                        if found_service not in services:
+                            break
+                    else:
+                        method, port, app_id, mac = (
+                            method(host)
+                        )
+                        break
+                else:
+                    return False
+            elif year <= 2013:
+                method, port, app_id, mac = legacy(host)
+            elif year <= 2015:
+                method, port, app_id, mac = encrypted(host)
+            else:
+                method, port, app_id, mac = websocket(host)
+
+            if mac is None:
+                logger.warning(
+                    'Unable to acquire TV\'s mac address'
+                )
+
+            logger.debug(
+                'Discovered TV:' +
+                ' UUID - ' +
+                uuid +
+                ' IP - ' +
+                host
+            )
+
+            config = Config(
+                host=host,
+                method=method,
+                upnp_locations=upnp_locations,
+                model=model,
+                uuid=uuid,
+                mac=mac,
+                app_id=app_id,
+                port=port,
+            )
+
+            self._parent.callback(config, None)
+
+        return config
+
 
     def stop(self):
         if self.sock is not None:
